@@ -48,6 +48,8 @@ static char const RCSID[] =
 #include "pppd/pppd.h"
 #include "pppd/fsm.h"
 #include "pppd/lcp.h"
+extern int got_sigterm;
+extern int got_sighup;
 #else
 int persist = 0;
 #endif
@@ -68,13 +70,10 @@ static void
 parseForHostUniq(UINT16_t type, UINT16_t len, unsigned char *data,
 		 void *extra)
 {
-    int *val = (int *) extra;
-    if (type == TAG_HOST_UNIQ && len == sizeof(pid_t)) {
-	pid_t tmp;
-	memcpy(&tmp, data, len);
-	if (tmp == getpid()) {
-	    *val = 1;
-	}
+    PPPoETag *tag = extra;
+
+    if (type == TAG_HOST_UNIQ && len == ntohs(tag->length)) {
+	tag->length = memcmp(data, tag->payload, len);
     }
 }
 
@@ -92,16 +91,16 @@ parseForHostUniq(UINT16_t type, UINT16_t len, unsigned char *data,
 static int
 packetIsForMe(PPPoEConnection *conn, PPPoEPacket *packet)
 {
-    int forMe = 0;
+    PPPoETag hostUniq = conn->hostUniq;
 
     /* If packet is not directed to our MAC address, forget it */
     if (memcmp(packet->ethHdr.h_dest, conn->myEth, ETH_ALEN)) return 0;
 
     /* If we're not using the Host-Unique tag, then accept the packet */
-    if (!conn->useHostUniq) return 1;
+    if (!conn->hostUniq.length) return 1;
 
-    parsePacket(packet, parseForHostUniq, &forMe);
-    return forMe;
+    parsePacket(packet, parseForHostUniq, &hostUniq);
+    return !hostUniq.length;
 }
 
 /**********************************************************************
@@ -330,16 +329,12 @@ sendPADI(PPPoEConnection *conn)
     }
 
     /* If we're using Host-Uniq, copy it over */
-    if (conn->useHostUniq) {
-	PPPoETag hostUniq;
-	pid_t pid = getpid();
-	hostUniq.type = htons(TAG_HOST_UNIQ);
-	hostUniq.length = htons(sizeof(pid));
-	memcpy(hostUniq.payload, &pid, sizeof(pid));
-	CHECK_ROOM(cursor, packet.payload, sizeof(pid) + TAG_HDR_SIZE);
-	memcpy(cursor, &hostUniq, sizeof(pid) + TAG_HDR_SIZE);
-	cursor += sizeof(pid) + TAG_HDR_SIZE;
-	plen += sizeof(pid) + TAG_HDR_SIZE;
+    if (conn->hostUniq.length) {
+	int len = ntohs(conn->hostUniq.length);
+	CHECK_ROOM(cursor, packet.payload, len + TAG_HDR_SIZE);
+	memcpy(cursor, &conn->hostUniq, len + TAG_HDR_SIZE);
+	cursor += len + TAG_HDR_SIZE;
+	plen += len + TAG_HDR_SIZE;
     }
 
 #ifdef PLUGIN
@@ -403,6 +398,9 @@ waitForPADO(PPPoEConnection *conn, int timeout)
     expire_at.tv_sec += timeout;
 
     do {
+#ifdef PLUGIN
+	if (got_sigterm || got_sighup) return;
+#endif
 	if (BPF_BUFFER_IS_EMPTY) {
 	    if (gettimeofday(&now, NULL) < 0) {
 		fatalSys("gettimeofday (waitForPADO)");
@@ -429,6 +427,9 @@ waitForPADO(PPPoEConnection *conn, int timeout)
 	    while(1) {
 		r = select(conn->discoverySocket+1, &readable, NULL, NULL, &tv);
 		if (r >= 0 || errno != EINTR) break;
+#ifdef PLUGIN
+		if (got_sigterm || got_sighup) return;
+#endif
 	    }
 	    if (r < 0) {
 		fatalSys("select (waitForPADO)");
@@ -465,8 +466,8 @@ waitForPADO(PPPoEConnection *conn, int timeout)
 	if (!packetIsForMe(conn, &packet)) continue;
 
 	if (packet.code == CODE_PADO) {
-	    if (NOT_UNICAST(packet.ethHdr.h_source)) {
-		printErr("Ignoring PADO packet from non-unicast MAC address");
+	    if (BROADCAST(packet.ethHdr.h_source)) {
+		printErr("Ignoring PADO packet from broadcast MAC address");
 		continue;
 	    }
 #ifdef PLUGIN
@@ -558,16 +559,12 @@ sendPADR(PPPoEConnection *conn)
     cursor += namelen + TAG_HDR_SIZE;
 
     /* If we're using Host-Uniq, copy it over */
-    if (conn->useHostUniq) {
-	PPPoETag hostUniq;
-	pid_t pid = getpid();
-	hostUniq.type = htons(TAG_HOST_UNIQ);
-	hostUniq.length = htons(sizeof(pid));
-	memcpy(hostUniq.payload, &pid, sizeof(pid));
-	CHECK_ROOM(cursor, packet.payload, sizeof(pid)+TAG_HDR_SIZE);
-	memcpy(cursor, &hostUniq, sizeof(pid) + TAG_HDR_SIZE);
-	cursor += sizeof(pid) + TAG_HDR_SIZE;
-	plen += sizeof(pid) + TAG_HDR_SIZE;
+    if (conn->hostUniq.length) {
+	int len = ntohs(conn->hostUniq.length);
+	CHECK_ROOM(cursor, packet.payload, len+TAG_HDR_SIZE);
+	memcpy(cursor, &conn->hostUniq, len + TAG_HDR_SIZE);
+	cursor += len + TAG_HDR_SIZE;
+	plen += len + TAG_HDR_SIZE;
     }
 
     /* Copy cookie and relay-ID if needed */
@@ -641,6 +638,9 @@ waitForPADS(PPPoEConnection *conn, int timeout)
     expire_at.tv_sec += timeout;
 
     do {
+#ifdef PLUGIN
+	if (got_sigterm || got_sighup) return;
+#endif
 	if (BPF_BUFFER_IS_EMPTY) {
 	    if (gettimeofday(&now, NULL) < 0) {
 		fatalSys("gettimeofday (waitForPADS)");
@@ -667,6 +667,9 @@ waitForPADS(PPPoEConnection *conn, int timeout)
 	    while(1) {
 		r = select(conn->discoverySocket+1, &readable, NULL, NULL, &tv);
 		if (r >= 0 || errno != EINTR) break;
+#ifdef PLUGIN
+		if (got_sigterm || got_sighup) return;
+#endif
 	    }
 	    if (r < 0) {
 		fatalSys("select (waitForPADS)");
@@ -757,6 +760,9 @@ discovery(PPPoEConnection *conn)
   SEND_PADI:
     padiAttempts = 0;
     do {
+#ifdef PLUGIN
+	if (got_sigterm || got_sighup) return;
+#endif
 	padiAttempts++;
 	if (padiAttempts > MAX_PADI_ATTEMPTS) {
 	    if (persist) {
@@ -764,7 +770,12 @@ discovery(PPPoEConnection *conn)
 		timeout = conn->discoveryTimeout;
 		printErr("Timeout waiting for PADO packets");
 	    } else {
+#ifdef PLUGIN
+		printErr("Timeout waiting for PADO packets");
+		return;
+#else
 		rp_fatal("Timeout waiting for PADO packets");
+#endif
 	    }
 	}
 	sendPADI(conn);
@@ -790,6 +801,9 @@ discovery(PPPoEConnection *conn)
     timeout = conn->discoveryTimeout;
     padrAttempts = 0;
     do {
+#ifdef PLUGIN
+	if (got_sigterm || got_sighup) return;
+#endif
 	padrAttempts++;
 	if (padrAttempts > MAX_PADI_ATTEMPTS) {
 	    if (persist) {
@@ -799,7 +813,12 @@ discovery(PPPoEConnection *conn)
 		/* Go back to sending PADI again */
 		goto SEND_PADI;
 	    } else {
+#ifdef PLUGIN
+		printErr("Timeout waiting for PADS packets");
+		return;
+#else
 		rp_fatal("Timeout waiting for PADS packets");
+#endif
 	    }
 	}
 	sendPADR(conn);

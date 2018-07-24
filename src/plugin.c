@@ -58,12 +58,13 @@ static char const RCSID[] =
 #define _ROOT_PATH ""
 #endif
 
-#define _PATH_ETHOPT         _ROOT_PATH "/etc/ppp/options."
+#define _PATH_ETHOPT         _ROOT_PATH "/ppp/options."
 
 char pppd_version[] = VERSION;
 
 static int seen_devnam[2] = {0, 0};
 static char *pppoe_reqd_mac = NULL;
+static char *host_uniq = NULL;
 
 /* From sys-linux.c in pppd -- MUST FIX THIS! */
 extern int new_style_driver;
@@ -89,6 +90,8 @@ static option_t Options[] = {
       "Be verbose about discovered access concentrators"},
     { "rp_pppoe_mac", o_string, &pppoe_reqd_mac,
       "Only connect to specified MAC address" },
+    { "host-uniq", o_string, &host_uniq,
+      "Specify custom Host-Uniq" },
     { NULL }
 };
 int (*OldDevnameHook)(char *cmd, char **argv, int doit) = NULL;
@@ -120,7 +123,6 @@ PPPOEInitDevice(void)
     SET_STRING(conn->ifName, devnam);
     conn->discoverySocket = -1;
     conn->sessionSocket = -1;
-    conn->useHostUniq = 1;
     conn->printACNames = printACNames;
     conn->discoveryTimeout = PADI_TIMEOUT;
     return 1;
@@ -178,6 +180,9 @@ PPPOEConnectDevice(void)
 	return -1;
     }
 
+    if (host_uniq && !parseHostUniq(host_uniq, &conn->hostUniq))
+	fatal("Illegal value for host-uniq option");
+
     if (acName) {
 	SET_STRING(conn->acName, acName);
     }
@@ -204,7 +209,7 @@ PPPOEConnectDevice(void)
         discovery(conn);
 	if (conn->discoveryState != STATE_SESSION) {
 	    error("Unable to complete PPPoE Discovery");
-	    return -1;
+	    goto ERROR;
 	}
     }
 
@@ -240,10 +245,21 @@ PPPOEConnectDevice(void)
     if (connect(conn->sessionSocket, (struct sockaddr *) &sp,
 		sizeof(struct sockaddr_pppox)) < 0) {
 	error("Failed to connect PPPoE socket: %d %m", errno);
-	return -1;
+	goto ERROR;
     }
 
     return conn->sessionSocket;
+
+ ERROR:
+    close(conn->sessionSocket);
+    conn->sessionSocket = -1;
+    /* Send PADT to reset the session unresponsive at buggy nas */
+    sendPADT(conn, NULL);
+    if (!existingSession) {
+	close(conn->discoverySocket);
+	conn->discoverySocket = -1;
+    }
+    return -1;
 }
 
 static void
@@ -256,7 +272,7 @@ PPPOESendConfig(int mtu,
     struct ifreq ifr;
 
     if (mtu > MAX_PPPOE_MTU) {
-	warn("Couldn't increase MTU to %d", mtu);
+	if (debug) warn("Couldn't increase MTU to %d", mtu);
 	mtu = MAX_PPPOE_MTU;
     }
     sock = socket(AF_INET, SOCK_DGRAM, 0);
@@ -280,7 +296,7 @@ PPPOERecvConfig(int mru,
 		int pcomp,
 		int accomp)
 {
-    if (mru > MAX_PPPOE_MTU) {
+    if (mru > MAX_PPPOE_MTU && debug) {
 	warn("Couldn't increase MRU to %d", mru);
     }
 }
@@ -299,6 +315,9 @@ PPPOEDisconnectDevice(void)
 {
     struct sockaddr_pppox sp;
 
+    if (conn->sessionSocket < 0)
+	goto ERROR;
+
     sp.sa_family = AF_PPPOX;
     sp.sa_protocol = PX_PROTO_OE;
     sp.sa_addr.pppoe.sid = 0;
@@ -306,12 +325,18 @@ PPPOEDisconnectDevice(void)
     memcpy(sp.sa_addr.pppoe.remote, conn->peerEth, ETH_ALEN);
     if (connect(conn->sessionSocket, (struct sockaddr *) &sp,
 		sizeof(struct sockaddr_pppox)) < 0) {
-	fatal("Failed to disconnect PPPoE socket: %d %m", errno);
-	return;
+	warn("Failed to disconnect PPPoE socket: %d %m", errno);
     }
     close(conn->sessionSocket);
-    close(conn->discoverySocket);
+    conn->sessionSocket = -1;
 
+ERROR:
+    /* Send PADT to reset the session unresponsive at buggy nas */
+    sendPADT(conn, NULL);
+    if (!existingSession) {
+	close(conn->discoverySocket);
+	conn->discoverySocket = -1;
+    }
 }
 
 static void
@@ -508,7 +533,9 @@ rp_fatal(char const *str)
 void
 sysErr(char const *str)
 {
-    rp_fatal(str);
+    char buf[1024];
+    sprintf(buf, "%.256s: %.256s", str, strerror(errno));
+    printErr(buf);
 }
 
 void pppoe_check_options(void)
