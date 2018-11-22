@@ -293,6 +293,7 @@ typedef struct PPPoEConnectionStruct {
     char *acName;		/* Desired AC name, if any */
     int synchronous;		/* Use synchronous PPP */
     PPPoETag hostUniq;		/* Use Host-Uniq tag */
+    int useHostUniq;            /* Use Host-Uniq tag */
     int printACNames;		/* Just print AC names */
     int skipDiscovery;		/* Skip discovery */
     int noDiscoverySocket;	/* Don't even open discovery socket */

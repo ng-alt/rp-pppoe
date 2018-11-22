@@ -522,21 +522,21 @@ main(int argc, char *argv[])
 	    conn.synchronous = 1;
 	    break;
 	case 'U':
-	    conn->useHostUniq = 1;
-	    if(conn->hostUniq.length) {
+	    conn.useHostUniq = 1;
+	    if(conn.hostUniq.length) {
 		fprintf(stderr, "-U and -W are mutually exclusive\n");
 		exit(EXIT_FAILURE);
 	    }
             char pidbuf[5];
             snprintf(pidbuf, sizeof(pidbuf), "%04x", getpid());
-            parseHostUniq(pidbuf, &conn->hostUniq);
+            parseHostUniq(pidbuf, &conn.hostUniq);
 	    break;
 	case 'W':
-	    if(conn->hostUniq.length) {
+	    if(conn.hostUniq.length) {
 		fprintf(stderr, "-U and -W are mutually exclusive\n");
 		exit(EXIT_FAILURE);
 	    }
-	    if (!parseHostUniq(optarg, &conn->hostUniq)) {
+	    if (!parseHostUniq(optarg, &conn.hostUniq)) {
                 fprintf(stderr, "Invalid host-uniq argument: %s\n", optarg);
                 exit(EXIT_FAILURE);
             }
